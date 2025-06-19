@@ -1,0 +1,24 @@
+FROM golang:1.22.7 as builder
+WORKDIR /app
+COPY . .
+
+# Run the build script to generate both binaries
+RUN chmod +x scripts/build.sh && \
+    scripts/build.sh && \
+    mkdir -p /app/bin
+
+# Binaries are already in the right location from the build script
+# Just make sure they're executable
+RUN chmod +x release/linux/amd64/drone-convert-to-harness release/linux/amd64/go-convert
+
+FROM alpine:3.17
+RUN apk --no-cache add ca-certificates
+
+# Copy only the necessary binaries from the builder
+COPY --from=builder /app/release/linux/amd64/drone-convert-to-harness /bin/
+COPY --from=builder /app/release/linux/amd64/go-convert /bin/go-convert
+
+# Make sure the binary is executable
+RUN chmod +x /bin/go-convert
+
+ENTRYPOINT ["/bin/drone-convert-to-harness"]

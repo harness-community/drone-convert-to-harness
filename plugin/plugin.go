@@ -105,6 +105,12 @@ func Exec(args Args) error {
 		return fmt.Errorf("failed to set output variable: %w", err)
 	}
 
+	// Export the converted YAML content directly via PLUGIN_HARNESS_YAML
+	if err := exportYAMLContent(args.HarnessOutputYAMLPath); err != nil {
+		// Don't fail the plugin, just log a warning to maintain existing behavior
+		logrus.Warnf("Failed to export YAML content: %v", err)
+	}
+
 	logrus.Infof("Conversion completed successfully\n")
 	return nil
 }
@@ -173,5 +179,45 @@ func WriteEnvToFile(key, value string) error {
 		return fmt.Errorf("failed to write to env: %w", err)
 	}
 
+	return nil
+}
+
+// exportYAMLContent reads the generated YAML file and exports its content via PLUGIN_HARNESS_YAML
+func exportYAMLContent(filePath string) error {
+	if filePath == "" {
+		return fmt.Errorf("file path cannot be empty")
+	}
+
+	// Get file info to check size before reading
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to get file info for %s: %w", filePath, err)
+	}
+
+	// Check if content exceeds 3MB limit
+	const maxSize = 3 * 1024 * 1024 // 3MB in bytes
+	if fileInfo.Size() > maxSize {
+		logrus.Infof("YAML file size (%d bytes) exceeds 3MB limit, PLUGIN_HARNESS_YAML not exported", fileInfo.Size())
+		return nil
+	}
+
+	// Handle empty files
+	if fileInfo.Size() == 0 {
+		logrus.Infof("YAML file is empty, exporting empty PLUGIN_HARNESS_YAML")
+		return WriteEnvToFile("PLUGIN_HARNESS_YAML", "")
+	}
+
+	// Read the generated YAML file
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read generated YAML file %s: %w", filePath, err)
+	}
+
+	// Export the YAML content as-is (multi-line with newlines)
+	if err := WriteEnvToFile("PLUGIN_HARNESS_YAML", string(content)); err != nil {
+		return fmt.Errorf("failed to export YAML content to environment: %w", err)
+	}
+
+	logrus.Infof("YAML content (%d bytes) exported successfully via PLUGIN_HARNESS_YAML", len(content))
 	return nil
 }

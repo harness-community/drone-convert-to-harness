@@ -5,6 +5,7 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -72,31 +73,31 @@ func Exec(args Args) error {
 	if err != nil {
 		return fmt.Errorf("failed to find go-convert binary: %w", err)
 	}
-	
+
 	// Build arguments for go-convert
 	cmdArgs := buildCommandArgs(args)
 
 	// Execute go-convert
 	logrus.Infof("Executing go-convert binary: %s\n", converterBin)
 	logrus.Infof("Arguments: %s\n", strings.Join(cmdArgs, " "))
-	
+
 	// Create output file
 	outputFile, err := os.Create(args.HarnessOutputYAMLPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer outputFile.Close()
-	
+
 	// Set up command
 	cmd := exec.Command(converterBin, cmdArgs...)
 	cmd.Stderr = os.Stderr  // Send stderr to console
 	cmd.Stdout = outputFile // Redirect stdout to the output file
-	
+
 	// Execute command
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("go-convert execution failed: %w", err)
 	}
-	
+
 	// Verify the output file was created
 	if _, err := os.Stat(args.HarnessOutputYAMLPath); os.IsNotExist(err) {
 		return fmt.Errorf("output file was not created: %s", args.HarnessOutputYAMLPath)
@@ -132,24 +133,24 @@ func findConverterBinary() (string, error) {
 // buildCommandArgs builds the command line arguments for go-convert
 func buildCommandArgs(args Args) []string {
 	var cmdArgs []string
-	
+
 	// Add the CI provider command first
 	cmdArgs = append(cmdArgs, args.CIProvider)
-	
+
 	// Add any additional options provided by the user
 	if args.Options != "" {
 		// Split the options string on whitespace
 		cmdArgs = append(cmdArgs, strings.Fields(args.Options)...)
 	}
-	
+
 	// Add downgrade flag if needed
 	if args.Downgrade {
 		cmdArgs = append(cmdArgs, "--downgrade")
 	}
-	
+
 	// Add source file path (must be the last argument)
 	cmdArgs = append(cmdArgs, args.SourceYAML)
-	
+
 	return cmdArgs
 }
 
@@ -158,12 +159,12 @@ func validate(args Args) error {
 	if args.SourceYAML == "" {
 		return fmt.Errorf("source YAML path not provided")
 	}
-	
+
 	// Check if source YAML exists
 	if _, err := os.Stat(args.SourceYAML); os.IsNotExist(err) {
 		return fmt.Errorf("source YAML file does not exist: %s", args.SourceYAML)
 	}
-	
+
 	return nil
 }
 
@@ -186,7 +187,6 @@ func WriteEnvToFile(key, value string) error {
 
 // exportYAMLContent reads the generated YAML file and exports its content via PLUGIN_HARNESS_YAML
 // The content is JSON-escaped to handle multi-line YAML properly in environment variables.
-// Consumers should unescape using: echo -e "$PLUGIN_HARNESS_YAML" or JSON.parse(`"${content}"`) in JS
 func exportYAMLContent(filePath string) error {
 	if filePath == "" {
 		return fmt.Errorf("file path cannot be empty")
@@ -217,17 +217,26 @@ func exportYAMLContent(filePath string) error {
 		return nil
 	}
 
-	jsonBytes, err := json.Marshal(string(content))
-	if err != nil {
+	// Use encoder with HTML escaping disabled for cleaner output
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false) // Prevents <> from becoming \u003c\u003e
+	if err := encoder.Encode(string(content)); err != nil {
 		return fmt.Errorf("failed to marshal YAML content: %w", err)
 	}
 
-	// Safety check: json.Marshal should always return at least `""` (2 characters)
+	// json.NewEncoder.Encode adds a trailing newline, remove it
+	jsonBytes := buf.Bytes()
+	if len(jsonBytes) > 0 && jsonBytes[len(jsonBytes)-1] == '\n' {
+		jsonBytes = jsonBytes[:len(jsonBytes)-1]
+	}
+
+	// Safety check: should always return at least `""` (2 characters)
 	if len(jsonBytes) < 2 {
 		return fmt.Errorf("unexpected JSON marshal result: %s", string(jsonBytes))
 	}
 
-	// Remove the surrounding quotes that json.Marshal adds
+	// Remove the surrounding quotes that JSON encoding adds
 	escapedContent := string(jsonBytes[1 : len(jsonBytes)-1])
 
 	// Additional safety: check if escaped content would be too large for env vars

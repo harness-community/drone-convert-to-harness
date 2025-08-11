@@ -5,12 +5,14 @@
 package plugin
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/sirupsen/logrus"
 )
@@ -70,31 +72,31 @@ func Exec(args Args) error {
 	if err != nil {
 		return fmt.Errorf("failed to find go-convert binary: %w", err)
 	}
-	
+
 	// Build arguments for go-convert
 	cmdArgs := buildCommandArgs(args)
 
 	// Execute go-convert
 	logrus.Infof("Executing go-convert binary: %s\n", converterBin)
 	logrus.Infof("Arguments: %s\n", strings.Join(cmdArgs, " "))
-	
+
 	// Create output file
 	outputFile, err := os.Create(args.HarnessOutputYAMLPath)
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
 	defer outputFile.Close()
-	
+
 	// Set up command
 	cmd := exec.Command(converterBin, cmdArgs...)
 	cmd.Stderr = os.Stderr  // Send stderr to console
 	cmd.Stdout = outputFile // Redirect stdout to the output file
-	
+
 	// Execute command
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("go-convert execution failed: %w", err)
 	}
-	
+
 	// Verify the output file was created
 	if _, err := os.Stat(args.HarnessOutputYAMLPath); os.IsNotExist(err) {
 		return fmt.Errorf("output file was not created: %s", args.HarnessOutputYAMLPath)
@@ -103,6 +105,12 @@ func Exec(args Args) error {
 	// Set output variable
 	if err := WriteEnvToFile("PLUGIN_HARNESS_YAML_PATH", args.HarnessOutputYAMLPath); err != nil {
 		return fmt.Errorf("failed to set output variable: %w", err)
+	}
+
+	// Export the converted YAML content directly via PLUGIN_HARNESS_YAML
+	if err := exportYAMLContent(args.HarnessOutputYAMLPath); err != nil {
+		// Don't fail the plugin, just log a warning to maintain existing behavior
+		logrus.Warnf("Failed to export YAML content: %v", err)
 	}
 
 	logrus.Infof("Conversion completed successfully\n")
@@ -124,24 +132,24 @@ func findConverterBinary() (string, error) {
 // buildCommandArgs builds the command line arguments for go-convert
 func buildCommandArgs(args Args) []string {
 	var cmdArgs []string
-	
+
 	// Add the CI provider command first
 	cmdArgs = append(cmdArgs, args.CIProvider)
-	
+
 	// Add any additional options provided by the user
 	if args.Options != "" {
 		// Split the options string on whitespace
 		cmdArgs = append(cmdArgs, strings.Fields(args.Options)...)
 	}
-	
+
 	// Add downgrade flag if needed
 	if args.Downgrade {
 		cmdArgs = append(cmdArgs, "--downgrade")
 	}
-	
+
 	// Add source file path (must be the last argument)
 	cmdArgs = append(cmdArgs, args.SourceYAML)
-	
+
 	return cmdArgs
 }
 
@@ -150,12 +158,12 @@ func validate(args Args) error {
 	if args.SourceYAML == "" {
 		return fmt.Errorf("source YAML path not provided")
 	}
-	
+
 	// Check if source YAML exists
 	if _, err := os.Stat(args.SourceYAML); os.IsNotExist(err) {
 		return fmt.Errorf("source YAML file does not exist: %s", args.SourceYAML)
 	}
-	
+
 	return nil
 }
 
@@ -173,5 +181,52 @@ func WriteEnvToFile(key, value string) error {
 		return fmt.Errorf("failed to write to env: %w", err)
 	}
 
+	return nil
+}
+
+// exportYAMLContent reads the generated YAML file and exports its content via PLUGIN_HARNESS_YAML
+func exportYAMLContent(filePath string) error {
+	if filePath == "" {
+		return fmt.Errorf("file path cannot be empty")
+	}
+
+	// Check if file exists and get basic info
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to get file info for %s: %w", filePath, err)
+	}
+
+	// Handle empty files
+	if fileInfo.Size() == 0 {
+		logrus.Infof("YAML file is empty, exporting empty PLUGIN_HARNESS_YAML")
+		return WriteEnvToFile("PLUGIN_HARNESS_YAML", "")
+	}
+
+	// Read the generated YAML file
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to read generated YAML file %s: %w", filePath, err)
+	}
+
+	// Validate that content is valid UTF-8
+	if !utf8.Valid(content) {
+		logrus.Warnf("YAML file contains invalid UTF-8 sequences, PLUGIN_HARNESS_YAML not exported")
+		return nil
+	}
+
+	// Base64 encode the YAML content for safe environment variable storage
+	encodedContent := base64.StdEncoding.EncodeToString(content)
+
+	// Check if encoded content would be too large for env vars
+	if len(encodedContent) > 3*1024*1024 { // 3MB limit for env var
+		logrus.Warnf("Encoded YAML content size (%d bytes) exceeds 3MB env var limit, PLUGIN_HARNESS_YAML not exported", len(encodedContent))
+		return nil
+	}
+
+	if err := WriteEnvToFile("PLUGIN_HARNESS_YAML", encodedContent); err != nil {
+		return fmt.Errorf("failed to export YAML content to environment: %w", err)
+	}
+
+	logrus.Infof("YAML content (%d bytes) exported successfully via PLUGIN_HARNESS_YAML", len(content))
 	return nil
 }

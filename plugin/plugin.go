@@ -5,8 +5,7 @@
 package plugin
 
 import (
-	"bytes"
-	"encoding/json"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -186,7 +185,6 @@ func WriteEnvToFile(key, value string) error {
 }
 
 // exportYAMLContent reads the generated YAML file and exports its content via PLUGIN_HARNESS_YAML
-// The content is JSON-escaped to handle multi-line YAML properly in environment variables.
 func exportYAMLContent(filePath string) error {
 	if filePath == "" {
 		return fmt.Errorf("file path cannot be empty")
@@ -210,43 +208,22 @@ func exportYAMLContent(filePath string) error {
 		return fmt.Errorf("failed to read generated YAML file %s: %w", filePath, err)
 	}
 
-	// Export the YAML content with JSON escaping for proper environment variable handling
-	// First validate that content is valid UTF-8
+	// Validate that content is valid UTF-8
 	if !utf8.Valid(content) {
 		logrus.Warnf("YAML file contains invalid UTF-8 sequences, PLUGIN_HARNESS_YAML not exported")
 		return nil
 	}
 
-	// Use encoder with HTML escaping disabled for cleaner output
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false) // Prevents <> from becoming \u003c\u003e
-	if err := encoder.Encode(string(content)); err != nil {
-		return fmt.Errorf("failed to marshal YAML content: %w", err)
-	}
+	// Base64 encode the YAML content for safe environment variable storage
+	encodedContent := base64.StdEncoding.EncodeToString(content)
 
-	// json.NewEncoder.Encode adds a trailing newline, remove it
-	jsonBytes := buf.Bytes()
-	if len(jsonBytes) > 0 && jsonBytes[len(jsonBytes)-1] == '\n' {
-		jsonBytes = jsonBytes[:len(jsonBytes)-1]
-	}
-
-	// Safety check: should always return at least `""` (2 characters)
-	if len(jsonBytes) < 2 {
-		return fmt.Errorf("unexpected JSON marshal result: %s", string(jsonBytes))
-	}
-
-	// Remove the surrounding quotes that JSON encoding adds
-	escapedContent := string(jsonBytes[1 : len(jsonBytes)-1])
-
-	// Additional safety: check if escaped content would be too large for env vars
-	// Most systems support ~2MB, but use 3MB to be consistent with original requirement
-	if len(escapedContent) > 3*1024*1024 { // 3MB limit for env var
-		logrus.Warnf("Escaped YAML content size (%d bytes) exceeds 3MB env var limit, PLUGIN_HARNESS_YAML not exported", len(escapedContent))
+	// Check if encoded content would be too large for env vars
+	if len(encodedContent) > 3*1024*1024 { // 3MB limit for env var
+		logrus.Warnf("Encoded YAML content size (%d bytes) exceeds 3MB env var limit, PLUGIN_HARNESS_YAML not exported", len(encodedContent))
 		return nil
 	}
 
-	if err := WriteEnvToFile("PLUGIN_HARNESS_YAML", escapedContent); err != nil {
+	if err := WriteEnvToFile("PLUGIN_HARNESS_YAML", encodedContent); err != nil {
 		return fmt.Errorf("failed to export YAML content to environment: %w", err)
 	}
 

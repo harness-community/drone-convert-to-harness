@@ -63,11 +63,50 @@ Available CLI options include:
 | `--docker-connector`| Docker connector                     |            |
 | `--org-secrets`     | Organization secrets (comma-separated)|            |
 
+#### Plugin-specific options (via `PLUGIN_OPTIONS`)
+
+These options are interpreted by this plugin (not passed to `go-convert`):
+
+- `--repo-name <value>` or `--repo-name=<value>`
+  - Injects `pipeline.properties.ci.codebase.repoName = <value>` into the converted YAML after `go-convert` runs.
+  - Quoted values are supported (e.g., `--repo-name "My Repo"`).
+
+Notes:
+- `PLUGIN_OPTIONS` parsing now honors shell-like quoting (via shlex), so arguments with spaces remain intact.
+- All other options continue to be passed through to `go-convert` unchanged.
+
 ### Outputs
 
 | Environment Variable          | Description                                    |
 |-------------------------------|------------------------------------------------|
 | `PLUGIN_HARNESS_YAML_PATH`    | Path to the generated Harness YAML file         |
+| `PLUGIN_HARNESS_YAML`         | Base64-encoded content of the generated Harness YAML |
+
+#### Decoding `PLUGIN_HARNESS_YAML`
+
+- Bash:
+  ```bash
+  echo "$PLUGIN_HARNESS_YAML" | base64 -d > harness_pipeline.yaml
+  ```
+- Go:
+  ```go
+  decoded, err := base64.StdEncoding.DecodeString(os.Getenv("PLUGIN_HARNESS_YAML"))
+  ```
+- Java:
+  ```java
+  byte[] decoded = java.util.Base64.getDecoder().decode(System.getenv("PLUGIN_HARNESS_YAML"));
+  ```
+
+### Example usage with `--repo-name`
+
+```yaml
+steps:
+  - name: convert-to-harness
+    image: harnesscommunity/drone-convert-to-harness
+    settings:
+      source_yaml: .drone.yml
+      options: --repo-connector opdrones3 --repo-name heehah --docker-connector harnesscommunity --org-secrets docker_password --build-branch master
+```
 
 ## Implementation Details
 

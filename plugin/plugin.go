@@ -14,7 +14,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/google/shlex"
 	"github.com/sirupsen/logrus"
+	"gopkg.in/yaml.v3"
 )
 
 // Args provides plugin execution arguments.
@@ -36,6 +38,130 @@ type Args struct {
 
 	// Additional CLI options to pass to go-convert
 	Options string `envconfig:"PLUGIN_OPTIONS"`
+}
+
+// parseOptionsAndExtractRepoName splits PLUGIN_OPTIONS and extracts/removes --repo-name
+func parseOptionsAndExtractRepoName(options string) ([]string, string, error) {
+    if strings.TrimSpace(options) == "" {
+        return nil, "", nil
+    }
+
+    tokens, err := shlex.Split(options)
+    if err != nil {
+        return nil, "", err
+    }
+
+    filtered := make([]string, 0, len(tokens))
+    var repoName string
+
+    for i := 0; i < len(tokens); i++ {
+        t := tokens[i]
+        if strings.HasPrefix(t, "--repo-name=") {
+            repoName = strings.TrimPrefix(t, "--repo-name=")
+            continue
+        }
+        if t == "--repo-name" {
+            if i+1 < len(tokens) {
+                repoName = tokens[i+1]
+                i++
+            } else {
+                logrus.Warnf("--repo-name provided without a value; ignoring")
+            }
+            continue
+        }
+        filtered = append(filtered, t)
+    }
+
+    return filtered, repoName, nil
+}
+
+// injectRepoNameIntoYAML adds/overrides pipeline.properties.ci.codebase.repoName in the YAML file
+func injectRepoNameIntoYAML(filePath, repoName string) error {
+    if strings.TrimSpace(repoName) == "" {
+        return nil
+    }
+
+    data, err := os.ReadFile(filePath)
+    if err != nil {
+        return fmt.Errorf("failed to read YAML for injection: %w", err)
+    }
+
+    var doc yaml.Node
+    if err := yaml.Unmarshal(data, &doc); err != nil {
+        return fmt.Errorf("failed to parse YAML for injection: %w", err)
+    }
+
+    if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+        return fmt.Errorf("unexpected YAML structure: missing document root")
+    }
+
+    root := doc.Content[0]
+    if root.Kind != yaml.MappingNode {
+        return fmt.Errorf("unexpected YAML structure: root is not a mapping")
+    }
+
+    pipeline := getOrCreateMap(root, "pipeline")
+    properties := getOrCreateMap(pipeline, "properties")
+    ci := getOrCreateMap(properties, "ci")
+    codebase := getOrCreateMap(ci, "codebase")
+
+    setMapScalar(codebase, "repoName", repoName)
+
+    out, err := yaml.Marshal(&doc)
+    if err != nil {
+        return fmt.Errorf("failed to marshal updated YAML: %w", err)
+    }
+
+    if err := os.WriteFile(filePath, out, 0644); err != nil {
+        return fmt.Errorf("failed to write updated YAML: %w", err)
+    }
+
+    logrus.Infof("Injected repoName=%q into YAML codebase", repoName)
+    return nil
+}
+
+// getOrCreateMap finds the map value for key under mapNode, creating it if absent.
+func getOrCreateMap(mapNode *yaml.Node, key string) *yaml.Node {
+    if mapNode == nil || mapNode.Kind != yaml.MappingNode {
+        // Replace non-mapping with an empty mapping for safety
+        *mapNode = yaml.Node{Kind: yaml.MappingNode}
+    }
+    // Search for existing key
+    for i := 0; i < len(mapNode.Content); i += 2 {
+        k := mapNode.Content[i]
+        v := mapNode.Content[i+1]
+        if k.Value == key {
+            if v.Kind != yaml.MappingNode {
+                // Replace non-mapping value with a mapping
+                newMap := &yaml.Node{Kind: yaml.MappingNode}
+                mapNode.Content[i+1] = newMap
+                return newMap
+            }
+            return v
+        }
+    }
+    // Not found, append new mapping
+    keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+    valNode := &yaml.Node{Kind: yaml.MappingNode}
+    mapNode.Content = append(mapNode.Content, keyNode, valNode)
+    return valNode
+}
+
+// setMapScalar sets or adds a scalar value under key in a mapping node.
+func setMapScalar(mapNode *yaml.Node, key, value string) {
+    if mapNode == nil || mapNode.Kind != yaml.MappingNode {
+        return
+    }
+    for i := 0; i < len(mapNode.Content); i += 2 {
+        if mapNode.Content[i].Value == key {
+            mapNode.Content[i+1] = &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+            return
+        }
+    }
+    // Not found, append new key/value
+    k := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
+    v := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+    mapNode.Content = append(mapNode.Content, k, v)
 }
 
 // Exec executes the plugin.
@@ -67,14 +193,20 @@ func Exec(args Args) error {
 
 	// All CLI options should be specified via PLUGIN_OPTIONS
 
+	// Parse PLUGIN_OPTIONS and extract --repo-name (if present)
+	optionTokens, repoName, err := parseOptionsAndExtractRepoName(args.Options)
+	if err != nil {
+		return fmt.Errorf("failed to parse PLUGIN_OPTIONS: %w", err)
+	}
+
 	// Get path to the go-convert binary
 	converterBin, err := findConverterBinary()
 	if err != nil {
 		return fmt.Errorf("failed to find go-convert binary: %w", err)
 	}
 
-	// Build arguments for go-convert
-	cmdArgs := buildCommandArgs(args)
+	// Build arguments for go-convert (with filtered options)
+	cmdArgs := buildCommandArgs(args, optionTokens)
 
 	// Execute go-convert
 	logrus.Infof("Executing go-convert binary: %s\n", converterBin)
@@ -100,6 +232,13 @@ func Exec(args Args) error {
 	// Verify the output file was created
 	if _, err := os.Stat(args.HarnessOutputYAMLPath); os.IsNotExist(err) {
 		return fmt.Errorf("output file was not created: %s", args.HarnessOutputYAMLPath)
+	}
+
+	// Inject repoName into YAML, if provided via --repo-name
+	if repoName != "" {
+		if err := injectRepoNameIntoYAML(args.HarnessOutputYAMLPath, repoName); err != nil {
+			logrus.Warnf("Failed to inject repoName into YAML: %v", err)
+		}
 	}
 
 	// Set output variable
@@ -130,16 +269,15 @@ func findConverterBinary() (string, error) {
 }
 
 // buildCommandArgs builds the command line arguments for go-convert
-func buildCommandArgs(args Args) []string {
+func buildCommandArgs(args Args, optionTokens []string) []string {
 	var cmdArgs []string
 
 	// Add the CI provider command first
 	cmdArgs = append(cmdArgs, args.CIProvider)
 
-	// Add any additional options provided by the user
-	if args.Options != "" {
-		// Split the options string on whitespace
-		cmdArgs = append(cmdArgs, strings.Fields(args.Options)...)
+	// Add any additional options provided by the user (already tokenized and filtered)
+	if len(optionTokens) > 0 {
+		cmdArgs = append(cmdArgs, optionTokens...)
 	}
 
 	// Add downgrade flag if needed
